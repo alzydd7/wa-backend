@@ -25,7 +25,7 @@ const PAYLOADS = {
 
 async function connectWA() {
     try {
-        const { state, saveCreds } = await useMultiFileAuthState('baileys-session');
+        const { state, saveCreds } = await useMultiFileAuthState('session-wa');
         
         sock = makeWASocket({
             auth: state,
